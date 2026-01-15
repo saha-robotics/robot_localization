@@ -57,6 +57,9 @@ namespace robot_localization
 {
 using namespace std::chrono_literals;
 
+// Constant for the "_enabled" parameter suffix length
+constexpr size_t ENABLED_SUFFIX_LENGTH = 8;
+
 template<typename T>
 RosFilter<T>::RosFilter(const rclcpp::NodeOptions & options)
 : Node(options.arguments()[0], options),
@@ -201,8 +204,8 @@ void RosFilter<T>::accelerationCallback(
   
   // Check if this sensor is enabled
   std::string enable_param_name = sensor_name + "_enabled";
-  if (sensor_enabled_.find(enable_param_name) != sensor_enabled_.end() &&
-      !sensor_enabled_[enable_param_name]) {
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
     return;
   }
@@ -505,8 +508,8 @@ void RosFilter<T>::imuCallback(
 {
   // Check if this sensor is enabled
   std::string enable_param_name = topic_name + "_enabled";
-  if (sensor_enabled_.find(enable_param_name) != sensor_enabled_.end() &&
-      !sensor_enabled_[enable_param_name]) {
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << topic_name << " is disabled, ignoring measurement");
     return;
   }
@@ -1862,8 +1865,8 @@ void RosFilter<T>::odometryCallback(
 {
   // Check if this sensor is enabled
   std::string enable_param_name = topic_name + "_enabled";
-  if (sensor_enabled_.find(enable_param_name) != sensor_enabled_.end() &&
-      !sensor_enabled_[enable_param_name]) {
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << topic_name << " is disabled, ignoring measurement");
     return;
   }
@@ -1936,8 +1939,8 @@ void RosFilter<T>::poseCallback(
   
   // Check if this sensor is enabled
   std::string enable_param_name = sensor_name + "_enabled";
-  if (sensor_enabled_.find(enable_param_name) != sensor_enabled_.end() &&
-      !sensor_enabled_[enable_param_name]) {
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
     return;
   }
@@ -2387,8 +2390,8 @@ void RosFilter<T>::twistCallback(
   
   // Check if this sensor is enabled
   std::string enable_param_name = sensor_name + "_enabled";
-  if (sensor_enabled_.find(enable_param_name) != sensor_enabled_.end() &&
-      !sensor_enabled_[enable_param_name]) {
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
     return;
   }
@@ -2558,8 +2561,9 @@ void RosFilter<T>::aggregateDiagnostics(
   for (const auto & sensor : sensor_enabled_) {
     // Extract sensor name without "_enabled" suffix
     std::string sensor_name = sensor.first;
-    if (sensor_name.size() > 8 && sensor_name.substr(sensor_name.size() - 8) == "_enabled") {
-      sensor_name = sensor_name.substr(0, sensor_name.size() - 8);
+    if (sensor_name.size() > ENABLED_SUFFIX_LENGTH && 
+        sensor_name.substr(sensor_name.size() - ENABLED_SUFFIX_LENGTH) == "_enabled") {
+      sensor_name = sensor_name.substr(0, sensor_name.size() - ENABLED_SUFFIX_LENGTH);
     }
     
     if (sensor.second) {
@@ -3630,8 +3634,8 @@ rcl_interfaces::msg::SetParametersResult RosFilter<T>::parametersCallback(
     std::string param_name = param.get_name();
     
     // Check if this is a sensor enable parameter (ends with "_enabled")
-    if (param_name.size() > 8 && 
-        param_name.substr(param_name.size() - 8) == "_enabled") {
+    if (param_name.size() > ENABLED_SUFFIX_LENGTH && 
+        param_name.substr(param_name.size() - ENABLED_SUFFIX_LENGTH) == "_enabled") {
       if (param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
         bool enabled = param.as_bool();
         sensor_enabled_[param_name] = enabled;
