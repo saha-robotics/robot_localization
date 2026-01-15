@@ -192,6 +192,21 @@ void RosFilter<T>::accelerationCallback(
 
   const std::string & topic_name = callback_data.topic_name_;
 
+  // Extract the base sensor name (remove _acceleration suffix if present)
+  std::string sensor_name = topic_name;
+  size_t pos = sensor_name.find("_acceleration");
+  if (pos != std::string::npos) {
+    sensor_name = sensor_name.substr(0, pos);
+  }
+  
+  // Check if this sensor is enabled
+  std::string enable_param_name = sensor_name + "_enabled";
+  if (sensor_enabled_.find(enable_param_name) != sensor_enabled_.end() &&
+      !sensor_enabled_[enable_param_name]) {
+    RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
+    return;
+  }
+
   RF_DEBUG(
     "------ RosFilter<T>::accelerationCallback (" << topic_name <<
       ") ------\n")
