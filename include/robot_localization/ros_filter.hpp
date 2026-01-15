@@ -373,6 +373,13 @@ protected:
   void aggregateDiagnostics(
     diagnostic_updater::DiagnosticStatusWrapper & wrapper);
 
+  //! @brief Callback for parameter changes at runtime
+  //! @param[in] parameters - The parameters that were changed
+  //! @return Result indicating success or failure of parameter change
+  //!
+  rcl_interfaces::msg::SetParametersResult parametersCallback(
+    const std::vector<rclcpp::Parameter> & parameters);
+
   //! @brief Utility method for copying covariances from ROS covariance arrays
   //! to Eigen matrices
   //!
@@ -660,6 +667,13 @@ protected:
   //!
   std::map<std::string, bool> remove_gravitational_acceleration_;
 
+  //! @brief Map to store enable/disable state for each sensor input
+  //!
+  //! This map stores the enable state for each sensor. When a sensor is
+  //! disabled, its measurements are not integrated into the filter.
+  //!
+  std::map<std::string, bool> sensor_enabled_;
+
   //! @brief An implicitly time ordered queue of past filter states used for
   //! smoothing.
   //
@@ -769,6 +783,11 @@ protected:
   //! @brief Used for updating the diagnostics
   //!
   std::unique_ptr<diagnostic_updater::Updater> diagnostic_updater_;
+
+  //! @brief Callback handle for parameter change callback
+  //!
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    parameters_callback_handle_;
 
   //! @brief Position publisher
   //!
