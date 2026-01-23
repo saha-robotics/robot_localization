@@ -57,6 +57,9 @@ namespace robot_localization
 {
 using namespace std::chrono_literals;
 
+// Constant for the "_enabled" parameter suffix length
+constexpr size_t ENABLED_SUFFIX_LENGTH = 8;
+
 template<typename T>
 RosFilter<T>::RosFilter(const rclcpp::NodeOptions & options)
 : Node(options.arguments()[0], options),
@@ -191,6 +194,21 @@ void RosFilter<T>::accelerationCallback(
   }
 
   const std::string & topic_name = callback_data.topic_name_;
+
+  // Extract the base sensor name (remove _acceleration suffix if present)
+  std::string sensor_name = topic_name;
+  size_t pos = sensor_name.find("_acceleration");
+  if (pos != std::string::npos) {
+    sensor_name = sensor_name.substr(0, pos);
+  }
+  
+  // Check if this sensor is enabled
+  std::string enable_param_name = sensor_name + "_enabled";
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
+    RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
+    return;
+  }
 
   RF_DEBUG(
     "------ RosFilter<T>::accelerationCallback (" << topic_name <<
@@ -488,6 +506,14 @@ void RosFilter<T>::imuCallback(
   const CallbackData & twist_callback_data,
   const CallbackData & accel_callback_data)
 {
+  // Check if this sensor is enabled
+  std::string enable_param_name = topic_name + "_enabled";
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
+    RF_DEBUG("Sensor " << topic_name << " is disabled, ignoring measurement");
+    return;
+  }
+
   RF_DEBUG(
     "------ RosFilter<T>::imuCallback (" <<
       topic_name << ") ------\n")         // << "IMU message:\n" << *msg);
@@ -1141,6 +1167,11 @@ void RosFilter<T>::loadParams()
         odom_topic_name +
         std::string("_queue_size"), 10);
 
+      // Declare and initialize enable/disable parameter for this sensor
+      bool sensor_enabled = this->declare_parameter(
+        odom_topic_name + std::string("_enabled"), true);
+      sensor_enabled_[odom_topic_name + "_enabled"] = sensor_enabled;
+
       // Now pull in its boolean update vector configuration. Create separate
       // vectors for pose and twist data, and then zero out the opposite values
       // in each vector (no pose data in the twist update vector and
@@ -1286,6 +1317,11 @@ void RosFilter<T>::loadParams()
         pose_topic_name +
         std::string("_queue_size"), 10);
 
+      // Declare and initialize enable/disable parameter for this sensor
+      bool sensor_enabled = this->declare_parameter(
+        pose_topic_name + std::string("_enabled"), true);
+      sensor_enabled_[pose_topic_name + "_enabled"] = sensor_enabled;
+
       // Pull in the sensor's config, zero out values that are invalid for the
       // pose type
       std::vector<bool> pose_update_vec = loadUpdateConfig(pose_topic_name);
@@ -1385,6 +1421,11 @@ void RosFilter<T>::loadParams()
       int queue_size = this->declare_parameter(
         twist_topic_name +
         std::string("_queue_size"), 10);
+
+      // Declare and initialize enable/disable parameter for this sensor
+      bool sensor_enabled = this->declare_parameter(
+        twist_topic_name + std::string("_enabled"), true);
+      sensor_enabled_[twist_topic_name + "_enabled"] = sensor_enabled;
 
       // Pull in the sensor's config, zero out values that are invalid for the
       // twist type
@@ -1501,6 +1542,11 @@ void RosFilter<T>::loadParams()
       int queue_size = this->declare_parameter(
         imu_topic_name +
         std::string("_queue_size"), 10);
+
+      // Declare and initialize enable/disable parameter for this sensor
+      bool sensor_enabled = this->declare_parameter(
+        imu_topic_name + std::string("_enabled"), true);
+      sensor_enabled_[imu_topic_name + "_enabled"] = sensor_enabled;
 
       // Now pull in its boolean update vector configuration and differential
       // update configuration (as this contains pose information)
@@ -1817,6 +1863,14 @@ void RosFilter<T>::odometryCallback(
   const CallbackData & pose_callback_data,
   const CallbackData & twist_callback_data)
 {
+  // Check if this sensor is enabled
+  std::string enable_param_name = topic_name + "_enabled";
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
+    RF_DEBUG("Sensor " << topic_name << " is disabled, ignoring measurement");
+    return;
+  }
+
   // If we've just reset the filter, then we want to ignore any messages
   // that arrive with an older timestamp
   if (last_set_pose_time_ >= msg->header.stamp) {
@@ -1875,6 +1929,21 @@ void RosFilter<T>::poseCallback(
   const bool imu_data)
 {
   const std::string & topic_name = callback_data.topic_name_;
+
+  // Extract the base sensor name (remove _pose suffix if present)
+  std::string sensor_name = topic_name;
+  size_t pos = sensor_name.find("_pose");
+  if (pos != std::string::npos) {
+    sensor_name = sensor_name.substr(0, pos);
+  }
+  
+  // Check if this sensor is enabled
+  std::string enable_param_name = sensor_name + "_enabled";
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
+    RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
+    return;
+  }
 
   // If we've just reset the filter, then we want to ignore any messages
   // that arrive with an older timestamp
@@ -1979,6 +2048,10 @@ void RosFilter<T>::initialize()
     shared_from_this());
 
   loadParams();
+
+  // Set up parameter callback for dynamic reconfiguration
+  parameters_callback_handle_ = this->add_on_set_parameters_callback(
+    std::bind(&RosFilter<T>::parametersCallback, this, std::placeholders::_1));
 
   if (print_diagnostics_) {
     diagnostic_updater_->add(
@@ -2308,6 +2381,21 @@ void RosFilter<T>::twistCallback(
 {
   const std::string & topic_name = callback_data.topic_name_;
 
+  // Extract the base sensor name (remove _twist suffix if present)
+  std::string sensor_name = topic_name;
+  size_t pos = sensor_name.find("_twist");
+  if (pos != std::string::npos) {
+    sensor_name = sensor_name.substr(0, pos);
+  }
+  
+  // Check if this sensor is enabled
+  std::string enable_param_name = sensor_name + "_enabled";
+  auto it = sensor_enabled_.find(enable_param_name);
+  if (it != sensor_enabled_.end() && !it->second) {
+    RF_DEBUG("Sensor " << sensor_name << " is disabled, ignoring measurement");
+    return;
+  }
+
   // If we've just reset the filter, then we want to ignore any messages
   // that arrive with an older timestamp
   if (last_set_pose_time_ >= msg->header.stamp) {
@@ -2464,6 +2552,54 @@ void RosFilter<T>::aggregateDiagnostics(
     wrapper.add(diagIt->first, diagIt->second);
   }
   dynamic_diagnostics_.clear();
+
+  // Add sensor enable/disable status to diagnostics
+  std::stringstream sensor_status;
+  std::vector<std::string> enabled_sensors;
+  std::vector<std::string> disabled_sensors;
+  
+  for (const auto & sensor : sensor_enabled_) {
+    // Extract sensor name without "_enabled" suffix
+    std::string sensor_name = sensor.first;
+    if (sensor_name.size() > ENABLED_SUFFIX_LENGTH && 
+        sensor_name.substr(sensor_name.size() - ENABLED_SUFFIX_LENGTH) == "_enabled") {
+      sensor_name = sensor_name.substr(0, sensor_name.size() - ENABLED_SUFFIX_LENGTH);
+    }
+    
+    if (sensor.second) {
+      enabled_sensors.push_back(sensor_name);
+    } else {
+      disabled_sensors.push_back(sensor_name);
+    }
+  }
+  
+  // Build status message
+  if (!enabled_sensors.empty()) {
+    sensor_status << "Enabled: ";
+    for (size_t i = 0; i < enabled_sensors.size(); ++i) {
+      sensor_status << enabled_sensors[i];
+      if (i < enabled_sensors.size() - 1) {
+        sensor_status << ", ";
+      }
+    }
+  }
+  
+  if (!disabled_sensors.empty()) {
+    if (!enabled_sensors.empty()) {
+      sensor_status << " | ";
+    }
+    sensor_status << "Disabled: ";
+    for (size_t i = 0; i < disabled_sensors.size(); ++i) {
+      sensor_status << disabled_sensors[i];
+      if (i < disabled_sensors.size() - 1) {
+        sensor_status << ", ";
+      }
+    }
+  }
+  
+  if (!sensor_status.str().empty()) {
+    wrapper.add("Sensor Status", sensor_status.str());
+  }
 
   // Reset the warning level for the dynamic diagnostic messages
   dynamic_diag_error_level_ = diagnostic_msgs::msg::DiagnosticStatus::OK;
@@ -3484,6 +3620,39 @@ void RosFilter<T>::clearMeasurementQueue()
   while (!measurement_queue_.empty() && rclcpp::ok()) {
     measurement_queue_.pop();
   }
+}
+
+template<typename T>
+rcl_interfaces::msg::SetParametersResult RosFilter<T>::parametersCallback(
+  const std::vector<rclcpp::Parameter> & parameters)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+  result.reason = "success";
+
+  for (const auto & param : parameters) {
+    std::string param_name = param.get_name();
+    
+    // Check if this is a sensor enable parameter (ends with "_enabled")
+    if (param_name.size() > ENABLED_SUFFIX_LENGTH && 
+        param_name.substr(param_name.size() - ENABLED_SUFFIX_LENGTH) == "_enabled") {
+      if (param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
+        bool enabled = param.as_bool();
+        sensor_enabled_[param_name] = enabled;
+        
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Sensor '%s' is now %s",
+          param_name.c_str(),
+          enabled ? "enabled" : "disabled");
+      } else {
+        result.successful = false;
+        result.reason = "Parameter " + param_name + " must be of type bool";
+      }
+    }
+  }
+
+  return result;
 }
 }  // namespace robot_localization
 
