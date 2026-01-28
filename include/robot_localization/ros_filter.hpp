@@ -674,6 +674,13 @@ protected:
   //!
   std::map<std::string, bool> sensor_enabled_;
 
+  //! @brief Map to store previous enable/disable state for each sensor input
+  //!
+  //! This map stores the previous enable state for each sensor, allowing
+  //! detection of state changes when parameters are updated.
+  //!
+  std::map<std::string, bool> previous_sensor_enabled_;
+
   //! @brief An implicitly time ordered queue of past filter states used for
   //! smoothing.
   //
