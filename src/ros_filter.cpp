@@ -511,6 +511,30 @@ void RosFilter<T>::imuCallback(
   auto it = sensor_enabled_.find(enable_param_name);
   if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << topic_name << " is disabled, ignoring measurement");
+
+    auto it_prev_enabled = previous_sensor_enabled_.find(enable_param_name);
+    if (it_prev_enabled != previous_sensor_enabled_.end()) {
+      if (it_prev_enabled->second) {
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Sensor %s has been disabled. Zeroing orientation states only.",
+          topic_name.c_str());
+        previous_sensor_enabled_[enable_param_name] = false;
+
+        // Get the current state and zero out only orientation-related values
+        Eigen::VectorXd current_state = filter_.getState();
+
+        // // Zero only orientation (roll, pitch, yaw) and angular velocities
+        current_state(StateMemberVroll) = 0.0;
+        current_state(StateMemberVpitch) = 0.0;
+        current_state(StateMemberVyaw) = 0.0;
+
+        // Set the modified state (position and linear velocity are preserved)
+        filter_.setState(current_state);
+
+        RF_DEBUG("\n------ /RosFilter<T>::imuCallback - Orientation zeroed ------\n");
+      }
+    } 
     return;
   }
 
