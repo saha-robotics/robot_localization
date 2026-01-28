@@ -511,6 +511,30 @@ void RosFilter<T>::imuCallback(
   auto it = sensor_enabled_.find(enable_param_name);
   if (it != sensor_enabled_.end() && !it->second) {
     RF_DEBUG("Sensor " << topic_name << " is disabled, ignoring measurement");
+
+    auto it_prev_enabled = previous_sensor_enabled_.find(enable_param_name);
+    if (it_prev_enabled != previous_sensor_enabled_.end()) {
+      if (it_prev_enabled->second) {
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Sensor %s has been disabled. Zeroing orientation states only.",
+          topic_name.c_str());
+        previous_sensor_enabled_[enable_param_name] = false;
+
+        // Get the current state and zero out only orientation-related values
+        Eigen::VectorXd current_state = filter_.getState();
+
+        // // Zero only orientation (roll, pitch, yaw) and angular velocities
+        current_state(StateMemberVroll) = 0.0;
+        current_state(StateMemberVpitch) = 0.0;
+        current_state(StateMemberVyaw) = 0.0;
+
+        // Set the modified state (position and linear velocity are preserved)
+        filter_.setState(current_state);
+
+        RF_DEBUG("\n------ /RosFilter<T>::imuCallback - Orientation zeroed ------\n");
+      }
+    } 
     return;
   }
 
@@ -3637,14 +3661,36 @@ rcl_interfaces::msg::SetParametersResult RosFilter<T>::parametersCallback(
     if (param_name.size() > ENABLED_SUFFIX_LENGTH && 
         param_name.substr(param_name.size() - ENABLED_SUFFIX_LENGTH) == "_enabled") {
       if (param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
-        bool enabled = param.as_bool();
-        sensor_enabled_[param_name] = enabled;
+        bool new_enabled = param.as_bool();
         
-        RCLCPP_INFO(
-          this->get_logger(),
-          "Sensor '%s' is now %s",
-          param_name.c_str(),
-          enabled ? "enabled" : "disabled");
+        // Get the previous enabled state (default to true if not set)
+        bool previous_enabled = true;
+        auto it = sensor_enabled_.find(param_name);
+        if (it != sensor_enabled_.end()) {
+          previous_enabled = it->second;
+        }
+        
+        // Store the previous state before updating
+        previous_sensor_enabled_[param_name] = previous_enabled;
+        
+        // Update the current enabled state
+        sensor_enabled_[param_name] = new_enabled;
+        
+        // Log the state change with previous value
+        if (previous_enabled != new_enabled) {
+          RCLCPP_INFO(
+            this->get_logger(),
+            "Sensor '%s' state changed from %s to %s",
+            param_name.c_str(),
+            previous_enabled ? "enabled" : "disabled",
+            new_enabled ? "enabled" : "disabled");
+        } else {
+          RCLCPP_DEBUG(
+            this->get_logger(),
+            "Sensor '%s' state unchanged: %s",
+            param_name.c_str(),
+            new_enabled ? "enabled" : "disabled");
+        }
       } else {
         result.successful = false;
         result.reason = "Parameter " + param_name + " must be of type bool";
