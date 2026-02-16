@@ -481,6 +481,12 @@ protected:
     std::vector<bool> & updateVector, Eigen::VectorXd & measurement,
     Eigen::MatrixXd & measurementCovariance);
 
+  //! @brief Applies Zero Velocity Update (ZUPT) when the robot is detected
+  //! as stationary. Injects zero-velocity pseudo-measurements into the filter
+  //! to prevent drift from noisy IMU data while stationary.
+  //!
+  void applyZupt(const rclcpp::Time & current_time);
+
   //! @brief Whether or not we print diagnostic messages to the /diagnostics
   //! topic
   //!
@@ -826,6 +832,50 @@ protected:
   //! Must be on heap since pointer is passed to diagnostic_updater::FrequencyStatusParam
   //!
   double max_frequency_;
+
+  // ─── ZUPT (Zero Velocity Update) members ───
+
+  //! @brief Latest raw odometry twist values (from wheel encoders).
+  //! Used by ZUPT to detect stationary state from the raw sensor, not the filter estimate.
+  //! Updated in odometryCallback with each incoming odom message.
+  double zupt_raw_odom_vx_;
+  double zupt_raw_odom_vy_;
+  double zupt_raw_odom_vz_;
+  double zupt_raw_odom_vyaw_;
+
+  //! @brief Whether we have received at least one odometry message (for ZUPT readiness)
+  bool zupt_odom_received_;
+
+  //! @brief Timestamp of the last raw odometry message used for ZUPT
+  rclcpp::Time zupt_last_odom_time_;
+
+  //! @brief Whether ZUPT is enabled
+  bool zupt_enabled_;
+
+  //! @brief Whether angular ZUPT is enabled (zero angular velocity when stationary)
+  bool zupt_angular_enabled_;
+
+  //! @brief Linear velocity threshold (m/s) below which robot is considered stationary
+  double zupt_linear_velocity_threshold_;
+
+  //! @brief Angular velocity threshold (rad/s) below which robot is considered stationary
+  double zupt_angular_velocity_threshold_;
+
+  //! @brief Number of consecutive stationary detections before activating ZUPT
+  int zupt_min_consecutive_count_;
+
+  //! @brief Covariance (variance) for the zero-velocity pseudo-measurement.
+  //! Smaller = more trust in zero velocity, larger = less aggressive correction.
+  double zupt_linear_covariance_;
+
+  //! @brief Covariance (variance) for the zero angular velocity pseudo-measurement.
+  double zupt_angular_covariance_;
+
+  //! @brief Counter tracking consecutive stationary detections
+  int zupt_consecutive_count_;
+
+  //! @brief Whether the filter is currently in ZUPT (stationary) state
+  bool zupt_active_;
 };
 
 }  // namespace robot_localization
