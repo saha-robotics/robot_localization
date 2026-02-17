@@ -481,9 +481,13 @@ protected:
     std::vector<bool> & updateVector, Eigen::VectorXd & measurement,
     Eigen::MatrixXd & measurementCovariance);
 
-  //! @brief Applies Zero Velocity Update (ZUPT) when the robot is detected
-  //! as stationary. Injects zero-velocity pseudo-measurements into the filter
-  //! to prevent drift from noisy IMU data while stationary.
+  //! @brief Applies a Zero Velocity Update (ZUPT) when the robot is detected
+  //! as stationary. This performs a "hard" ZUPT by directly setting the
+  //! twist-related components of the filter state to zero and updating the
+  //! corresponding rows and columns of the state covariance (e.g., zeroing or
+  //! otherwise overwriting them) to reflect the enforced zero-velocity
+  //! constraint. Normal process noise will subsequently allow velocities to
+  //! evolve again once motion resumes.
   //!
   void applyZupt(const rclcpp::Time & current_time);
 
