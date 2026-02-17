@@ -3936,28 +3936,83 @@ rcl_interfaces::msg::SetParametersResult RosFilter<T>::parametersCallback(
       continue;
     }
     if (param_name == "zupt_linear_velocity_threshold" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
-      zupt_linear_velocity_threshold_ = param.as_double();
-      RCLCPP_INFO(this->get_logger(), "ZUPT linear velocity threshold set to: %.4f", zupt_linear_velocity_threshold_);
+      double threshold = param.as_double();
+      if (threshold < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_linear_velocity_threshold' (%.4f); clamping to 0.0",
+          threshold);
+        threshold = 0.0;
+      }
+      zupt_linear_velocity_threshold_ = threshold;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT linear velocity threshold set to: %.4f",
+        zupt_linear_velocity_threshold_);
       continue;
     }
     if (param_name == "zupt_angular_velocity_threshold" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
-      zupt_angular_velocity_threshold_ = param.as_double();
-      RCLCPP_INFO(this->get_logger(), "ZUPT angular velocity threshold set to: %.4f", zupt_angular_velocity_threshold_);
+      double threshold = param.as_double();
+      if (threshold < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_angular_velocity_threshold' (%.4f); clamping to 0.0",
+          threshold);
+        threshold = 0.0;
+      }
+      zupt_angular_velocity_threshold_ = threshold;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT angular velocity threshold set to: %.4f",
+        zupt_angular_velocity_threshold_);
       continue;
     }
     if (param_name == "zupt_min_consecutive_count" && param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
-      zupt_min_consecutive_count_ = param.as_int();
-      RCLCPP_INFO(this->get_logger(), "ZUPT min consecutive count set to: %d", zupt_min_consecutive_count_);
+      int64_t count = param.as_int();
+      if (count < 1) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received value < 1 for 'zupt_min_consecutive_count' (%ld); clamping to 1",
+          static_cast<long>(count));
+        count = 1;
+      }
+      zupt_min_consecutive_count_ = static_cast<int>(count);
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT min consecutive count set to: %d",
+        zupt_min_consecutive_count_);
       continue;
     }
     if (param_name == "zupt_linear_covariance" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
-      zupt_linear_covariance_ = param.as_double();
-      RCLCPP_INFO(this->get_logger(), "ZUPT linear covariance set to: %.6f", zupt_linear_covariance_);
+      double cov = param.as_double();
+      if (cov < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_linear_covariance' (%.6f); clamping to 0.0",
+          cov);
+        cov = 0.0;
+      }
+      zupt_linear_covariance_ = cov;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT linear covariance set to: %.6f",
+        zupt_linear_covariance_);
       continue;
     }
     if (param_name == "zupt_angular_covariance" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
-      zupt_angular_covariance_ = param.as_double();
-      RCLCPP_INFO(this->get_logger(), "ZUPT angular covariance set to: %.6f", zupt_angular_covariance_);
+      double cov = param.as_double();
+      if (cov < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_angular_covariance' (%.6f); clamping to 0.0",
+          cov);
+        cov = 0.0;
+      }
+      zupt_angular_covariance_ = cov;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT angular covariance set to: %.6f",
+        zupt_angular_covariance_);
       continue;
     }
 
