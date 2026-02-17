@@ -87,7 +87,22 @@ RosFilter<T>::RosFilter(const rclcpp::NodeOptions & options)
   last_set_pose_time_(0, 0, RCL_ROS_TIME),
   latest_control_time_(0, 0, RCL_ROS_TIME),
   tf_timeout_(0ns),
-  tf_time_offset_(0ns)
+  tf_time_offset_(0ns),
+  zupt_raw_odom_vx_(0.0),
+  zupt_raw_odom_vy_(0.0),
+  zupt_raw_odom_vz_(0.0),
+  zupt_raw_odom_vyaw_(0.0),
+  zupt_odom_received_(false),
+  zupt_last_odom_time_(0, 0, RCL_ROS_TIME),
+  zupt_enabled_(false),
+  zupt_angular_enabled_(false),
+  zupt_linear_velocity_threshold_(0.01),
+  zupt_angular_velocity_threshold_(0.01),
+  zupt_min_consecutive_count_(5),
+  zupt_linear_covariance_(0.0),
+  zupt_angular_covariance_(0.0),
+  zupt_consecutive_count_(0),
+  zupt_active_(false)
 {
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
   tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
@@ -782,6 +797,161 @@ void RosFilter<T>::integrateMeasurements(const rclcpp::Time & current_time)
   }
 
   RF_DEBUG("\n----- /RosFilter<T>::integrateMeasurements ------\n");
+}
+
+template<typename T>
+void RosFilter<T>::applyZupt(const rclcpp::Time & current_time)
+{
+  // ZUPT requires raw odometry data from wheel encoders.
+  // If we haven't received any odom message yet, skip.
+  if (!zupt_odom_received_) {
+    RF_DEBUG("ZUPT: No odometry data received yet, skipping.\n");
+    return;
+  }
+
+  // Check if odom data is stale (older than 2x sensor timeout)
+  rclcpp::Duration odom_age = current_time - zupt_last_odom_time_;
+  if (odom_age > filter_.getSensorTimeout() * 2) {
+    RF_DEBUG("ZUPT: Odometry data is stale (age=" <<
+      filter_utilities::toSec(odom_age) << "s), skipping.\n");
+    return;
+  }
+
+  // Use raw wheel odometry twist for stationary detection.
+  // Wheel encoders report near-zero when the robot is truly stopped,
+  // unlike IMU which has noise even when stationary.
+  double linear_vel_magnitude;
+  double angular_vel_magnitude;
+
+  if (two_d_mode_) {
+    linear_vel_magnitude = std::sqrt(
+      zupt_raw_odom_vx_ * zupt_raw_odom_vx_ +
+      zupt_raw_odom_vy_ * zupt_raw_odom_vy_);
+    angular_vel_magnitude = std::fabs(zupt_raw_odom_vyaw_);
+  } else {
+    linear_vel_magnitude = std::sqrt(
+      zupt_raw_odom_vx_ * zupt_raw_odom_vx_ +
+      zupt_raw_odom_vy_ * zupt_raw_odom_vy_ +
+      zupt_raw_odom_vz_ * zupt_raw_odom_vz_);
+    angular_vel_magnitude = std::fabs(zupt_raw_odom_vyaw_);
+  }
+
+  // Check if robot is considered stationary based on raw wheel odometry:
+  // - Linear velocity from wheels below threshold
+  // - Angular velocity from wheels below threshold
+  bool is_stationary =
+    (linear_vel_magnitude < zupt_linear_velocity_threshold_) &&
+    (angular_vel_magnitude < zupt_angular_velocity_threshold_);
+
+  if (is_stationary) {
+    zupt_consecutive_count_++;
+  } else {
+    zupt_consecutive_count_ = 0;
+    if (zupt_active_) {
+      zupt_active_ = false;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT deactivated - wheel motion detected "
+        "(odom_linear_vel=%.4f, odom_angular_vel=%.4f)",
+        linear_vel_magnitude, angular_vel_magnitude);
+    }
+    return;
+  }
+
+  // Only activate ZUPT after enough consecutive stationary detections
+  if (zupt_consecutive_count_ < zupt_min_consecutive_count_) {
+    return;
+  }
+
+  if (!zupt_active_) {
+    zupt_active_ = true;
+    RCLCPP_INFO(
+      this->get_logger(),
+      "ZUPT activated - wheels stationary "
+      "(odom_linear_vel=%.4f, odom_angular_vel=%.4f, count=%d)",
+      linear_vel_magnitude, angular_vel_magnitude, zupt_consecutive_count_);
+  }
+
+  // ═══ HARD ZUPT: Directly override state vector and covariance ═══
+  // This is the traditional INS/GPS ZUPT approach. Instead of injecting a
+  // weak pseudo-measurement that competes with high-rate IMU data, we
+  // directly zero out the velocity components in the state vector and
+  // clamp the corresponding covariance diagonal entries. This guarantees
+  // the filter state stays at zero velocity while stationary, regardless
+  // of IMU noise magnitude or frequency.
+
+  Eigen::VectorXd state = filter_.getState();
+  Eigen::MatrixXd covariance = filter_.getEstimateErrorCovariance();
+
+  // Use a tiny floor value to prevent matrix singularity. When user
+  // sets covariance to 0.0, we use 1e-15 which is effectively zero
+  // for double precision but keeps the covariance matrix invertible.
+  const double lin_cov = std::max(zupt_linear_covariance_, 1e-15);
+  const double ang_cov = std::max(zupt_angular_covariance_, 1e-15);
+
+  // Collect the list of state indices that ZUPT will lock
+  std::vector<int> locked_states;
+
+  // Linear velocities are always locked by ZUPT
+  locked_states.push_back(StateMemberVx);
+  locked_states.push_back(StateMemberVy);
+  if (!two_d_mode_) {
+    locked_states.push_back(StateMemberVz);
+  }
+
+  // Linear accelerations are also locked
+  locked_states.push_back(StateMemberAx);
+  locked_states.push_back(StateMemberAy);
+  if (!two_d_mode_) {
+    locked_states.push_back(StateMemberAz);
+  }
+
+  // Angular velocities (if angular ZUPT is enabled)
+  if (zupt_angular_enabled_) {
+    locked_states.push_back(StateMemberVyaw);
+    if (!two_d_mode_) {
+      locked_states.push_back(StateMemberVroll);
+      locked_states.push_back(StateMemberVpitch);
+    }
+  }
+
+  // Zero the state values for all locked states
+  for (int idx : locked_states) {
+    state(idx) = 0.0;
+  }
+
+  // ═══ KEY FIX: Zero the ENTIRE row AND column for each locked state ═══
+  // Only zeroing the diagonal allows cross-correlation terms to survive.
+  // During predict, F * P * F' uses these cross-terms to regenerate
+  // non-zero velocity covariance, which gives Kalman gain > 0, which
+  // lets IMU corrections leak into the velocity state.
+  // By zeroing ALL entries involving locked states, we completely
+  // decouple them from the rest of the state in the covariance matrix.
+  for (int idx : locked_states) {
+    for (int j = 0; j < STATE_SIZE; j++) {
+      covariance(idx, j) = 0.0;
+      covariance(j, idx) = 0.0;
+    }
+  }
+
+  // Set the diagonal to the appropriate floor value
+  for (int idx : locked_states) {
+    if (idx == StateMemberVx || idx == StateMemberVy || idx == StateMemberVz ||
+        idx == StateMemberAx || idx == StateMemberAy || idx == StateMemberAz) {
+      covariance(idx, idx) = lin_cov;
+    } else {
+      // Angular velocity states
+      covariance(idx, idx) = ang_cov;
+    }
+  }
+
+  // Apply the corrected state and covariance back to the filter
+  filter_.setState(state);
+  filter_.setEstimateErrorCovariance(covariance);
+
+  RF_DEBUG("ZUPT applied: zeroed velocities and full covariance rows/cols "
+    "(linear_cov=" << lin_cov <<
+    ", angular_cov=" << ang_cov << ")\n");
 }
 
 template<typename T>
@@ -1878,6 +2048,42 @@ void RosFilter<T>::loadParams()
 
     filter_.setEstimateErrorCovariance(initial_estimate_error_covariance);
   }
+
+  // ─── ZUPT (Zero Velocity Update) parameters ───
+  zupt_enabled_ = this->declare_parameter("zupt_enabled", false);
+  zupt_angular_enabled_ = this->declare_parameter("zupt_angular_enabled", false);
+  zupt_linear_velocity_threshold_ = this->declare_parameter(
+    "zupt_linear_velocity_threshold", 0.01);
+  zupt_angular_velocity_threshold_ = this->declare_parameter(
+    "zupt_angular_velocity_threshold", 0.01);
+  zupt_min_consecutive_count_ = this->declare_parameter(
+    "zupt_min_consecutive_count", 5);
+  zupt_linear_covariance_ = this->declare_parameter(
+    "zupt_linear_covariance", 0.0);
+  zupt_angular_covariance_ = this->declare_parameter(
+    "zupt_angular_covariance", 0.0);
+
+  // Which odom topic to use for ZUPT stationary detection.
+  // This should be the raw wheel encoder odom (e.g., odom0).
+  int zupt_odom_index = this->declare_parameter("zupt_odom_index", 0);
+  std::stringstream zupt_odom_ss;
+  zupt_odom_ss << "odom" << zupt_odom_index;
+  zupt_odom_topic_name_ = zupt_odom_ss.str();
+
+  if (zupt_enabled_) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "ZUPT enabled: odom_source=%s, angular=%s, "
+      "lin_vel_thresh=%.4f, ang_vel_thresh=%.4f, "
+      "min_count=%d, lin_cov=%.6f, ang_cov=%.6f",
+      zupt_odom_topic_name_.c_str(),
+      zupt_angular_enabled_ ? "true" : "false",
+      zupt_linear_velocity_threshold_,
+      zupt_angular_velocity_threshold_,
+      zupt_min_consecutive_count_,
+      zupt_linear_covariance_,
+      zupt_angular_covariance_);
+  }
 }
 
 template<typename T>
@@ -1918,6 +2124,18 @@ void RosFilter<T>::odometryCallback(
   RF_DEBUG(
     "------ RosFilter<T>::odometryCallback (" <<
       topic_name << ") ------\n")         // << "Odometry message:\n" << *msg);
+
+  // Store raw odometry twist for ZUPT stationary detection.
+  // Only store from the odom topic that matches zupt_odom_topic_name_ to avoid
+  // accidentally reading from an already-fused odom source.
+  if (zupt_enabled_ && topic_name == zupt_odom_topic_name_) {
+    zupt_raw_odom_vx_ = msg->twist.twist.linear.x;
+    zupt_raw_odom_vy_ = msg->twist.twist.linear.y;
+    zupt_raw_odom_vz_ = msg->twist.twist.linear.z;
+    zupt_raw_odom_vyaw_ = msg->twist.twist.angular.z;
+    zupt_odom_received_ = true;
+    zupt_last_odom_time_ = msg->header.stamp;
+  }
 
   if (pose_callback_data.update_sum_ > 0) {
     // Grab the pose portion of the message and pass it to the poseCallback
@@ -2136,8 +2354,56 @@ void RosFilter<T>::periodicUpdate()
   rclcpp::Time cur_time = this->now();
 
   if (toggled_on_) {
+    // When ZUPT is active, temporarily zero out process noise for velocity
+    // (and acceleration) states. This prevents the predict step from growing
+    // the velocity covariance, which would allow IMU corrections to pull
+    // velocity away from zero during the correct step.
+    bool zupt_pn_modified = false;
+    Eigen::MatrixXd original_process_noise;
+
+    if (zupt_enabled_ && zupt_active_ && filter_.getInitializedStatus()) {
+      original_process_noise = filter_.getProcessNoiseCovariance();
+      Eigen::MatrixXd modified_pn = original_process_noise;
+
+      // Zero out process noise for linear velocities
+      modified_pn(StateMemberVx, StateMemberVx) = 0.0;
+      modified_pn(StateMemberVy, StateMemberVy) = 0.0;
+      if (!two_d_mode_) {
+        modified_pn(StateMemberVz, StateMemberVz) = 0.0;
+      }
+
+      // Zero out process noise for accelerations
+      modified_pn(StateMemberAx, StateMemberAx) = 0.0;
+      modified_pn(StateMemberAy, StateMemberAy) = 0.0;
+      if (!two_d_mode_) {
+        modified_pn(StateMemberAz, StateMemberAz) = 0.0;
+      }
+
+      // Zero out process noise for angular velocities (if angular ZUPT)
+      if (zupt_angular_enabled_) {
+        modified_pn(StateMemberVyaw, StateMemberVyaw) = 0.0;
+        if (!two_d_mode_) {
+          modified_pn(StateMemberVroll, StateMemberVroll) = 0.0;
+          modified_pn(StateMemberVpitch, StateMemberVpitch) = 0.0;
+        }
+      }
+
+      filter_.setProcessNoiseCovariance(modified_pn);
+      zupt_pn_modified = true;
+    }
+
     // Now we'll integrate any measurements we've received
     integrateMeasurements(cur_time);
+
+    // Restore original process noise if we modified it
+    if (zupt_pn_modified) {
+      filter_.setProcessNoiseCovariance(original_process_noise);
+    }
+
+    // Apply Zero Velocity Update if enabled and filter is initialized
+    if (zupt_enabled_ && filter_.getInitializedStatus()) {
+      applyZupt(cur_time);
+    }
   } else {
     // Clear out measurements since we're not currently processing new entries
     clearMeasurementQueue();
@@ -3657,6 +3923,99 @@ rcl_interfaces::msg::SetParametersResult RosFilter<T>::parametersCallback(
   for (const auto & param : parameters) {
     std::string param_name = param.get_name();
     
+    // Handle ZUPT parameter dynamic reconfiguration
+    if (param_name == "zupt_enabled" && param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
+      zupt_enabled_ = param.as_bool();
+      if (!zupt_enabled_) { zupt_consecutive_count_ = 0; zupt_active_ = false; }
+      RCLCPP_INFO(this->get_logger(), "ZUPT enabled set to: %s", zupt_enabled_ ? "true" : "false");
+      continue;
+    }
+    if (param_name == "zupt_angular_enabled" && param.get_type() == rclcpp::ParameterType::PARAMETER_BOOL) {
+      zupt_angular_enabled_ = param.as_bool();
+      RCLCPP_INFO(this->get_logger(), "ZUPT angular enabled set to: %s", zupt_angular_enabled_ ? "true" : "false");
+      continue;
+    }
+    if (param_name == "zupt_linear_velocity_threshold" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      double threshold = param.as_double();
+      if (threshold < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_linear_velocity_threshold' (%.4f); clamping to 0.0",
+          threshold);
+        threshold = 0.0;
+      }
+      zupt_linear_velocity_threshold_ = threshold;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT linear velocity threshold set to: %.4f",
+        zupt_linear_velocity_threshold_);
+      continue;
+    }
+    if (param_name == "zupt_angular_velocity_threshold" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      double threshold = param.as_double();
+      if (threshold < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_angular_velocity_threshold' (%.4f); clamping to 0.0",
+          threshold);
+        threshold = 0.0;
+      }
+      zupt_angular_velocity_threshold_ = threshold;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT angular velocity threshold set to: %.4f",
+        zupt_angular_velocity_threshold_);
+      continue;
+    }
+    if (param_name == "zupt_min_consecutive_count" && param.get_type() == rclcpp::ParameterType::PARAMETER_INTEGER) {
+      int64_t count = param.as_int();
+      if (count < 1) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received value < 1 for 'zupt_min_consecutive_count' (%ld); clamping to 1",
+          static_cast<long>(count));
+        count = 1;
+      }
+      zupt_min_consecutive_count_ = static_cast<int>(count);
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT min consecutive count set to: %d",
+        zupt_min_consecutive_count_);
+      continue;
+    }
+    if (param_name == "zupt_linear_covariance" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      double cov = param.as_double();
+      if (cov < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_linear_covariance' (%.6f); clamping to 0.0",
+          cov);
+        cov = 0.0;
+      }
+      zupt_linear_covariance_ = cov;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT linear covariance set to: %.6f",
+        zupt_linear_covariance_);
+      continue;
+    }
+    if (param_name == "zupt_angular_covariance" && param.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+      double cov = param.as_double();
+      if (cov < 0.0) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Received negative value for 'zupt_angular_covariance' (%.6f); clamping to 0.0",
+          cov);
+        cov = 0.0;
+      }
+      zupt_angular_covariance_ = cov;
+      RCLCPP_INFO(
+        this->get_logger(),
+        "ZUPT angular covariance set to: %.6f",
+        zupt_angular_covariance_);
+      continue;
+    }
+
     // Check if this is a sensor enable parameter (ends with "_enabled")
     if (param_name.size() > ENABLED_SUFFIX_LENGTH && 
         param_name.substr(param_name.size() - ENABLED_SUFFIX_LENGTH) == "_enabled") {
