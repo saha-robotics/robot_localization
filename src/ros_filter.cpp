@@ -883,49 +883,75 @@ void RosFilter<T>::applyZupt(const rclcpp::Time & current_time)
   Eigen::VectorXd state = filter_.getState();
   Eigen::MatrixXd covariance = filter_.getEstimateErrorCovariance();
 
-  // Zero out linear velocities
-  state(StateMemberVx) = 0.0;
-  state(StateMemberVy) = 0.0;
+  // Use a tiny floor value to prevent matrix singularity. When user
+  // sets covariance to 0.0, we use 1e-15 which is effectively zero
+  // for double precision but keeps the covariance matrix invertible.
+  const double lin_cov = std::max(zupt_linear_covariance_, 1e-15);
+  const double ang_cov = std::max(zupt_angular_covariance_, 1e-15);
+
+  // Collect the list of state indices that ZUPT will lock
+  std::vector<int> locked_states;
+
+  // Linear velocities are always locked by ZUPT
+  locked_states.push_back(StateMemberVx);
+  locked_states.push_back(StateMemberVy);
   if (!two_d_mode_) {
-    state(StateMemberVz) = 0.0;
+    locked_states.push_back(StateMemberVz);
   }
 
-  // Clamp linear velocity covariance to ZUPT value (small = high confidence)
-  covariance(StateMemberVx, StateMemberVx) = zupt_linear_covariance_;
-  covariance(StateMemberVy, StateMemberVy) = zupt_linear_covariance_;
+  // Linear accelerations are also locked
+  locked_states.push_back(StateMemberAx);
+  locked_states.push_back(StateMemberAy);
   if (!two_d_mode_) {
-    covariance(StateMemberVz, StateMemberVz) = zupt_linear_covariance_;
+    locked_states.push_back(StateMemberAz);
   }
 
-  // Zero out angular velocities (if angular ZUPT is enabled)
+  // Angular velocities (if angular ZUPT is enabled)
   if (zupt_angular_enabled_) {
-    if (two_d_mode_) {
-      state(StateMemberVyaw) = 0.0;
-      covariance(StateMemberVyaw, StateMemberVyaw) = zupt_angular_covariance_;
-    } else {
-      state(StateMemberVroll) = 0.0;
-      state(StateMemberVpitch) = 0.0;
-      state(StateMemberVyaw) = 0.0;
-      covariance(StateMemberVroll, StateMemberVroll) = zupt_angular_covariance_;
-      covariance(StateMemberVpitch, StateMemberVpitch) = zupt_angular_covariance_;
-      covariance(StateMemberVyaw, StateMemberVyaw) = zupt_angular_covariance_;
+    locked_states.push_back(StateMemberVyaw);
+    if (!two_d_mode_) {
+      locked_states.push_back(StateMemberVroll);
+      locked_states.push_back(StateMemberVpitch);
     }
   }
 
-  // Also zero out linear accelerations to prevent drift accumulation
-  state(StateMemberAx) = 0.0;
-  state(StateMemberAy) = 0.0;
-  if (!two_d_mode_) {
-    state(StateMemberAz) = 0.0;
+  // Zero the state values for all locked states
+  for (int idx : locked_states) {
+    state(idx) = 0.0;
+  }
+
+  // ═══ KEY FIX: Zero the ENTIRE row AND column for each locked state ═══
+  // Only zeroing the diagonal allows cross-correlation terms to survive.
+  // During predict, F * P * F' uses these cross-terms to regenerate
+  // non-zero velocity covariance, which gives Kalman gain > 0, which
+  // lets IMU corrections leak into the velocity state.
+  // By zeroing ALL entries involving locked states, we completely
+  // decouple them from the rest of the state in the covariance matrix.
+  for (int idx : locked_states) {
+    for (int j = 0; j < STATE_SIZE; j++) {
+      covariance(idx, j) = 0.0;
+      covariance(j, idx) = 0.0;
+    }
+  }
+
+  // Set the diagonal to the appropriate floor value
+  for (int idx : locked_states) {
+    if (idx == StateMemberVx || idx == StateMemberVy || idx == StateMemberVz ||
+        idx == StateMemberAx || idx == StateMemberAy || idx == StateMemberAz) {
+      covariance(idx, idx) = lin_cov;
+    } else {
+      // Angular velocity states
+      covariance(idx, idx) = ang_cov;
+    }
   }
 
   // Apply the corrected state and covariance back to the filter
   filter_.setState(state);
   filter_.setEstimateErrorCovariance(covariance);
 
-  RF_DEBUG("ZUPT applied: zeroed velocities and clamped covariance "
-    "(linear_cov=" << zupt_linear_covariance_ <<
-    ", angular_cov=" << zupt_angular_covariance_ << ")\n");
+  RF_DEBUG("ZUPT applied: zeroed velocities and full covariance rows/cols "
+    "(linear_cov=" << lin_cov <<
+    ", angular_cov=" << ang_cov << ")\n");
 }
 
 template<typename T>
