@@ -855,6 +855,10 @@ protected:
   //! @brief Whether angular ZUPT is enabled (zero angular velocity when stationary)
   bool zupt_angular_enabled_;
 
+  //! @brief The odom topic name used for ZUPT stationary detection (e.g., "odom0")
+  //! Set via zupt_odom_index parameter. Only raw wheel odom should be used.
+  std::string zupt_odom_topic_name_;
+
   //! @brief Linear velocity threshold (m/s) below which robot is considered stationary
   double zupt_linear_velocity_threshold_;
 

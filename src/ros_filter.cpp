@@ -99,8 +99,8 @@ RosFilter<T>::RosFilter(const rclcpp::NodeOptions & options)
   zupt_linear_velocity_threshold_(0.01),
   zupt_angular_velocity_threshold_(0.01),
   zupt_min_consecutive_count_(5),
-  zupt_linear_covariance_(0.001),
-  zupt_angular_covariance_(0.001),
+  zupt_linear_covariance_(0.0),
+  zupt_angular_covariance_(0.0),
   zupt_consecutive_count_(0),
   zupt_active_(false)
 {
@@ -849,12 +849,10 @@ void RosFilter<T>::applyZupt(const rclcpp::Time & current_time)
     zupt_consecutive_count_ = 0;
     if (zupt_active_) {
       zupt_active_ = false;
-      RF_DEBUG("ZUPT deactivated - wheel motion detected "
-        "(odom_linear_vel=" << linear_vel_magnitude <<
-        ", odom_angular_vel=" << angular_vel_magnitude << ")\n");
-      RCLCPP_DEBUG(
+      RCLCPP_INFO(
         this->get_logger(),
-        "ZUPT deactivated - wheel motion detected (odom_linear_vel=%.4f, odom_angular_vel=%.4f)",
+        "ZUPT deactivated - wheel motion detected "
+        "(odom_linear_vel=%.4f, odom_angular_vel=%.4f)",
         linear_vel_magnitude, angular_vel_magnitude);
     }
     return;
@@ -867,83 +865,67 @@ void RosFilter<T>::applyZupt(const rclcpp::Time & current_time)
 
   if (!zupt_active_) {
     zupt_active_ = true;
-    RF_DEBUG("ZUPT activated - wheels stationary "
-      "(odom_linear_vel=" << linear_vel_magnitude <<
-      ", odom_angular_vel=" << angular_vel_magnitude <<
-      ", consecutive_count=" << zupt_consecutive_count_ << ")\n");
-    RCLCPP_DEBUG(
+    RCLCPP_INFO(
       this->get_logger(),
-      "ZUPT activated - wheels stationary (odom_linear_vel=%.4f, odom_angular_vel=%.4f, count=%d)",
+      "ZUPT activated - wheels stationary "
+      "(odom_linear_vel=%.4f, odom_angular_vel=%.4f, count=%d)",
       linear_vel_magnitude, angular_vel_magnitude, zupt_consecutive_count_);
   }
 
-  // === Inject zero linear velocity pseudo-measurement ===
-  {
-    Eigen::VectorXd measurement(STATE_SIZE);
-    Eigen::MatrixXd measurement_covariance(STATE_SIZE, STATE_SIZE);
-    measurement.setZero();
-    measurement_covariance.setZero();
+  // ═══ HARD ZUPT: Directly override state vector and covariance ═══
+  // This is the traditional INS/GPS ZUPT approach. Instead of injecting a
+  // weak pseudo-measurement that competes with high-rate IMU data, we
+  // directly zero out the velocity components in the state vector and
+  // clamp the corresponding covariance diagonal entries. This guarantees
+  // the filter state stays at zero velocity while stationary, regardless
+  // of IMU noise magnitude or frequency.
 
-    // Set up the update vector: only linear velocities
-    std::vector<bool> update_vector(STATE_SIZE, false);
-    update_vector[StateMemberVx] = true;
-    update_vector[StateMemberVy] = true;
-    if (!two_d_mode_) {
-      update_vector[StateMemberVz] = true;
-    }
+  Eigen::VectorXd state = filter_.getState();
+  Eigen::MatrixXd covariance = filter_.getEstimateErrorCovariance();
 
-    // Set measurement values to zero (zero velocity)
-    measurement(StateMemberVx) = 0.0;
-    measurement(StateMemberVy) = 0.0;
-    measurement(StateMemberVz) = 0.0;
-
-    // Set covariance for the zero-velocity measurement
-    measurement_covariance(StateMemberVx, StateMemberVx) = zupt_linear_covariance_;
-    measurement_covariance(StateMemberVy, StateMemberVy) = zupt_linear_covariance_;
-    measurement_covariance(StateMemberVz, StateMemberVz) = zupt_linear_covariance_;
-
-    // Enqueue the pseudo-measurement with no Mahalanobis rejection
-    enqueueMeasurement(
-      "zupt_linear", measurement, measurement_covariance,
-      update_vector, std::numeric_limits<double>::max(), current_time);
+  // Zero out linear velocities
+  state(StateMemberVx) = 0.0;
+  state(StateMemberVy) = 0.0;
+  if (!two_d_mode_) {
+    state(StateMemberVz) = 0.0;
   }
 
-  // === Inject zero angular velocity pseudo-measurement (if enabled) ===
+  // Clamp linear velocity covariance to ZUPT value (small = high confidence)
+  covariance(StateMemberVx, StateMemberVx) = zupt_linear_covariance_;
+  covariance(StateMemberVy, StateMemberVy) = zupt_linear_covariance_;
+  if (!two_d_mode_) {
+    covariance(StateMemberVz, StateMemberVz) = zupt_linear_covariance_;
+  }
+
+  // Zero out angular velocities (if angular ZUPT is enabled)
   if (zupt_angular_enabled_) {
-    Eigen::VectorXd measurement(STATE_SIZE);
-    Eigen::MatrixXd measurement_covariance(STATE_SIZE, STATE_SIZE);
-    measurement.setZero();
-    measurement_covariance.setZero();
-
-    // Set up the update vector: only angular velocities
-    std::vector<bool> update_vector(STATE_SIZE, false);
-    update_vector[StateMemberVroll] = true;
-    update_vector[StateMemberVpitch] = true;
-    update_vector[StateMemberVyaw] = true;
-
     if (two_d_mode_) {
-      update_vector[StateMemberVroll] = false;
-      update_vector[StateMemberVpitch] = false;
+      state(StateMemberVyaw) = 0.0;
+      covariance(StateMemberVyaw, StateMemberVyaw) = zupt_angular_covariance_;
+    } else {
+      state(StateMemberVroll) = 0.0;
+      state(StateMemberVpitch) = 0.0;
+      state(StateMemberVyaw) = 0.0;
+      covariance(StateMemberVroll, StateMemberVroll) = zupt_angular_covariance_;
+      covariance(StateMemberVpitch, StateMemberVpitch) = zupt_angular_covariance_;
+      covariance(StateMemberVyaw, StateMemberVyaw) = zupt_angular_covariance_;
     }
-
-    // Set measurement values to zero
-    measurement(StateMemberVroll) = 0.0;
-    measurement(StateMemberVpitch) = 0.0;
-    measurement(StateMemberVyaw) = 0.0;
-
-    // Set covariance for the zero angular velocity measurement
-    measurement_covariance(StateMemberVroll, StateMemberVroll) = zupt_angular_covariance_;
-    measurement_covariance(StateMemberVpitch, StateMemberVpitch) = zupt_angular_covariance_;
-    measurement_covariance(StateMemberVyaw, StateMemberVyaw) = zupt_angular_covariance_;
-
-    // Enqueue the pseudo-measurement with no Mahalanobis rejection
-    enqueueMeasurement(
-      "zupt_angular", measurement, measurement_covariance,
-      update_vector, std::numeric_limits<double>::max(), current_time);
   }
 
-  // Process the ZUPT measurements immediately
-  integrateMeasurements(current_time);
+  // Also zero out linear accelerations to prevent drift accumulation
+  state(StateMemberAx) = 0.0;
+  state(StateMemberAy) = 0.0;
+  if (!two_d_mode_) {
+    state(StateMemberAz) = 0.0;
+  }
+
+  // Apply the corrected state and covariance back to the filter
+  filter_.setState(state);
+  filter_.setEstimateErrorCovariance(covariance);
+
+  RF_DEBUG("ZUPT applied: zeroed velocities and clamped covariance "
+    "(linear_cov=" << zupt_linear_covariance_ <<
+    ", angular_cov=" << zupt_angular_covariance_ << ")\n");
 }
 
 template<typename T>
@@ -2051,19 +2033,31 @@ void RosFilter<T>::loadParams()
   zupt_min_consecutive_count_ = this->declare_parameter(
     "zupt_min_consecutive_count", 5);
   zupt_linear_covariance_ = this->declare_parameter(
-    "zupt_linear_covariance", 0.001);
+    "zupt_linear_covariance", 0.0);
   zupt_angular_covariance_ = this->declare_parameter(
-    "zupt_angular_covariance", 0.001);
+    "zupt_angular_covariance", 0.0);
 
-  RF_DEBUG(
-    "ZUPT configuration:\n" <<
-    "  zupt_enabled: " << (zupt_enabled_ ? "true" : "false") << "\n" <<
-    "  zupt_angular_enabled: " << (zupt_angular_enabled_ ? "true" : "false") << "\n" <<
-    "  zupt_linear_velocity_threshold: " << zupt_linear_velocity_threshold_ << "\n" <<
-    "  zupt_angular_velocity_threshold: " << zupt_angular_velocity_threshold_ << "\n" <<
-    "  zupt_min_consecutive_count: " << zupt_min_consecutive_count_ << "\n" <<
-    "  zupt_linear_covariance: " << zupt_linear_covariance_ << "\n" <<
-    "  zupt_angular_covariance: " << zupt_angular_covariance_ << "\n");
+  // Which odom topic to use for ZUPT stationary detection.
+  // This should be the raw wheel encoder odom (e.g., odom0).
+  int zupt_odom_index = this->declare_parameter("zupt_odom_index", 0);
+  std::stringstream zupt_odom_ss;
+  zupt_odom_ss << "odom" << zupt_odom_index;
+  zupt_odom_topic_name_ = zupt_odom_ss.str();
+
+  if (zupt_enabled_) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "ZUPT enabled: odom_source=%s, angular=%s, "
+      "lin_vel_thresh=%.4f, ang_vel_thresh=%.4f, "
+      "min_count=%d, lin_cov=%.6f, ang_cov=%.6f",
+      zupt_odom_topic_name_.c_str(),
+      zupt_angular_enabled_ ? "true" : "false",
+      zupt_linear_velocity_threshold_,
+      zupt_angular_velocity_threshold_,
+      zupt_min_consecutive_count_,
+      zupt_linear_covariance_,
+      zupt_angular_covariance_);
+  }
 }
 
 template<typename T>
@@ -2105,8 +2099,10 @@ void RosFilter<T>::odometryCallback(
     "------ RosFilter<T>::odometryCallback (" <<
       topic_name << ") ------\n")         // << "Odometry message:\n" << *msg);
 
-  // Store raw odometry twist for ZUPT stationary detection
-  if (zupt_enabled_) {
+  // Store raw odometry twist for ZUPT stationary detection.
+  // Only store from the odom topic that matches zupt_odom_topic_name_ to avoid
+  // accidentally reading from an already-fused odom source.
+  if (zupt_enabled_ && topic_name == zupt_odom_topic_name_) {
     zupt_raw_odom_vx_ = msg->twist.twist.linear.x;
     zupt_raw_odom_vy_ = msg->twist.twist.linear.y;
     zupt_raw_odom_vz_ = msg->twist.twist.linear.z;
@@ -2332,8 +2328,51 @@ void RosFilter<T>::periodicUpdate()
   rclcpp::Time cur_time = this->now();
 
   if (toggled_on_) {
+    // When ZUPT is active, temporarily zero out process noise for velocity
+    // (and acceleration) states. This prevents the predict step from growing
+    // the velocity covariance, which would allow IMU corrections to pull
+    // velocity away from zero during the correct step.
+    bool zupt_pn_modified = false;
+    Eigen::MatrixXd original_process_noise;
+
+    if (zupt_enabled_ && zupt_active_ && filter_.getInitializedStatus()) {
+      original_process_noise = filter_.getProcessNoiseCovariance();
+      Eigen::MatrixXd modified_pn = original_process_noise;
+
+      // Zero out process noise for linear velocities
+      modified_pn(StateMemberVx, StateMemberVx) = 0.0;
+      modified_pn(StateMemberVy, StateMemberVy) = 0.0;
+      if (!two_d_mode_) {
+        modified_pn(StateMemberVz, StateMemberVz) = 0.0;
+      }
+
+      // Zero out process noise for accelerations
+      modified_pn(StateMemberAx, StateMemberAx) = 0.0;
+      modified_pn(StateMemberAy, StateMemberAy) = 0.0;
+      if (!two_d_mode_) {
+        modified_pn(StateMemberAz, StateMemberAz) = 0.0;
+      }
+
+      // Zero out process noise for angular velocities (if angular ZUPT)
+      if (zupt_angular_enabled_) {
+        modified_pn(StateMemberVyaw, StateMemberVyaw) = 0.0;
+        if (!two_d_mode_) {
+          modified_pn(StateMemberVroll, StateMemberVroll) = 0.0;
+          modified_pn(StateMemberVpitch, StateMemberVpitch) = 0.0;
+        }
+      }
+
+      filter_.setProcessNoiseCovariance(modified_pn);
+      zupt_pn_modified = true;
+    }
+
     // Now we'll integrate any measurements we've received
     integrateMeasurements(cur_time);
+
+    // Restore original process noise if we modified it
+    if (zupt_pn_modified) {
+      filter_.setProcessNoiseCovariance(original_process_noise);
+    }
 
     // Apply Zero Velocity Update if enabled and filter is initialized
     if (zupt_enabled_ && filter_.getInitializedStatus()) {
