@@ -208,6 +208,30 @@ ekf_filter_node:
 # If your robot cannot instantaneously reach its deceleration limit, the permitted change can be controlled with these
 # gains
         deceleration_gains: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+# [ADVANCED] Zero Velocity Update (ZUPT) settings. When the robot is stationary, IMU noise can cause the filter state
+# to drift. ZUPT detects when the robot is not moving by checking raw wheel odometry twist, and when confirmed
+# stationary, directly zeroes the velocity components in the filter state (hard ZUPT). This is the traditional
+# INS/GPS ZUPT approach that guarantees no drift while stationary.
+# All ZUPT parameters are dynamically reconfigurable at runtime via ros2 param set.
+# Whether to enable ZUPT (zero velocity when stationary). Defaults to false.
+        zupt_enabled: false
+# Whether to also zero angular velocity when stationary. Useful for IMU yaw bias. Defaults to false.
+        zupt_angular_enabled: false
+# Which odom source to use for stationary detection (index, e.g., 0 for odom0). Use raw wheel encoder odom.
+        zupt_odom_index: 0
+# Linear velocity magnitude threshold (m/s) from raw wheel odometry. Below this = stationary. Defaults to 0.01.
+        zupt_linear_velocity_threshold: 0.01
+# Angular velocity magnitude threshold (rad/s) from raw wheel odometry. Below this = stationary. Defaults to 0.01.
+        zupt_angular_velocity_threshold: 0.01
+# Number of consecutive stationary detections before ZUPT activates. At 30Hz, 5 = 167ms delay. Defaults to 5.
+        zupt_min_consecutive_count: 5
+# After hard ZUPT zeroes velocities, this value is set as the velocity covariance diagonal.
+# Since process noise is also zeroed during ZUPT, P stays at this value and Kalman gain = 0,
+# meaning IMU corrections have zero effect on velocity states. 0.0 = absolute lock. Defaults to 0.0.
+        zupt_linear_covariance: 0.0
+# Same as above but for angular velocities. Defaults to 0.0.
+        zupt_angular_covariance: 0.0
 # [ADVANCED] The process noise covariance matrix can be difficult to tune, and can vary for each application, so it is
 # exposed as a configuration parameter. This matrix represents the noise we add to the total error after each
 # prediction step. The better the omnidirectional motion model matches your system, the smaller these values can be.
