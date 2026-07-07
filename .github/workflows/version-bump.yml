@@ -1,27 +1,26 @@
 name: Version Bump
 
-# When a devel -> main PR is merged, automatically bump the version in
-# package.xml based on the PR label (major/minor/patch).
+# This repo has no dedicated devel branch (only ROS-distro *-devel
+# branches), so any merged PR into humble-devel triggers a version bump
+# in package.xml based on the PR label (major/minor/patch).
 on:
   pull_request:
     types: [closed]
-    branches: [main]
+    branches: [humble-devel]
 
 permissions:
   contents: write
 
 jobs:
   bump:
-    # Run only on PRs that were actually merged AND opened from devel.
-    if: >-
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.head.ref == 'devel'
+    # Run on any PR that was actually merged into humble-devel.
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main
+      - name: Checkout humble-devel
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: humble-devel
           fetch-depth: 0
           # Org-level PAT that is in the ruleset bypass list, so the push
           # below is allowed on the protected branch.
@@ -75,4 +74,4 @@ jobs:
           fi
           git add package.xml
           git commit -m "chore(release): bump version ${{ steps.version.outputs.current }} -> ${{ steps.version.outputs.new }} [skip ci]"
-          git push origin main
+          git push origin humble-devel
