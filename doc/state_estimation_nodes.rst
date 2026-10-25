@@ -242,6 +242,15 @@ If any of your sensors produce data with timestamps that are older than the most
 ^^^^^^^^^^^^^^^
 If ``smooth_lagged_data`` is set to *true*, this parameter specifies the number of seconds for which the filter will retain its state and measurement history. This value should be at least as large as the time delta between your lagged measurements and the current time.
 
+~reject_out_of_history_measurements
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Defaults to *false*. When enabled together with ``smooth_lagged_data``, a measurement
+older than the current filter state is discarded with a diagnostic warning if no
+saved state strictly precedes its timestamp. This prevents a partial rewind from
+applying that measurement at the wrong time. Measurements covered by the retained
+history and subsequent current measurements are processed normally. This option
+does not add a fixed output delay or extend ``history_length``.
+
 ~[sensor]_nodelay
 ^^^^^^^^^^^^^^^^^
 
