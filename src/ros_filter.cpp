@@ -68,6 +68,7 @@ RosFilter<T>::RosFilter(const rclcpp::NodeOptions & options)
   publish_transform_(true),
   reset_on_time_jump_(false),
   smooth_lagged_data_(false),
+  reject_out_of_history_measurements_(false),
   toggled_on_(true),
   two_d_mode_(false),
   use_control_(false),
@@ -672,6 +673,39 @@ void RosFilter<T>::integrateMeasurements(const rclcpp::Time & current_time)
 
   bool predict_to_current_time = predict_to_current_time_;
 
+  while (reject_out_of_history_measurements_ && smooth_lagged_data_ &&
+    filter_.getInitializedStatus() &&
+    !measurement_queue_.empty())
+  {
+    const MeasurementPtr measurement = measurement_queue_.top();
+    if (measurement->time_ > current_time ||
+      measurement->time_ >= filter_.getLastMeasurementTime() ||
+      (!filter_state_history_.empty() &&
+      measurement->time_ > filter_state_history_.front()->last_measurement_time_))
+    {
+      break;
+    }
+
+    // Rewind needs a state strictly before the measurement; a partial rewind
+    // would apply the old pose at the wrong time.
+    std::ostringstream message;
+    message << std::setprecision(20) << "Discarding measurement at " <<
+      filter_utilities::toSec(measurement->time_) << " for " << measurement->topic_name_ <<
+      "; no preceding filter state. Oldest state: ";
+    if (filter_state_history_.empty()) {
+      message << "none";
+    } else {
+      message << filter_utilities::toSec(filter_state_history_.front()->last_measurement_time_);
+    }
+    message << ", filter time: " << filter_utilities::toSec(filter_.getLastMeasurementTime()) <<
+      ", configured history: " << filter_utilities::toSec(history_length_) << " s.";
+    addDiagnostic(
+      diagnostic_msgs::msg::DiagnosticStatus::WARN,
+      measurement->topic_name_ + "_history", message.str(), false);
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "%s", message.str().c_str());
+    measurement_queue_.pop();
+  }
+
   // If we have any measurements in the queue, process them
   if (!measurement_queue_.empty()) {
     // Check if the first measurement we're going to process is older than the
@@ -682,6 +716,7 @@ void RosFilter<T>::integrateMeasurements(const rclcpp::Time & current_time)
     const MeasurementPtr & first_measurement = measurement_queue_.top();
     int restored_measurement_count = 0;
     if (smooth_lagged_data_ &&
+      (!reject_out_of_history_measurements_ || first_measurement->time_ <= current_time) &&
       first_measurement->time_ < filter_.getLastMeasurementTime())
     {
       RF_DEBUG(
@@ -1102,6 +1137,8 @@ void RosFilter<T>::loadParams()
 
   // Smoothing window size
   smooth_lagged_data_ = this->declare_parameter("smooth_lagged_data", false);
+  reject_out_of_history_measurements_ =
+    this->declare_parameter("reject_out_of_history_measurements", false);
   double history_length_double = this->declare_parameter("history_length", 0.0);
 
   if (!smooth_lagged_data_ && std::abs(history_length_double) > 0) {
@@ -2524,11 +2561,10 @@ void RosFilter<T>::periodicUpdate()
       }
     }
 
-    // Retain the last published stamp so we can detect repeated transforms in future cycles
-    last_published_stamp_ = filtered_position->header.stamp;
-
     // Fire off the position and the transform
     if (!corrected_data) {
+      // A suppressed estimate must not lower the publication time boundary.
+      last_published_stamp_ = filtered_position->header.stamp;
       position_pub_->publish(std::move(filtered_position));
     }
 

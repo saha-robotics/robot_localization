@@ -517,6 +517,9 @@ protected:
   //!
   bool smooth_lagged_data_;
 
+  //! @brief Reject lagged measurements with no preceding state to rewind to.
+  bool reject_out_of_history_measurements_;
+
   //! @brief Whether the filter should process new measurements or not.
   //!
   bool toggled_on_;
